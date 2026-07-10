@@ -1,70 +1,51 @@
-# Task: 后端地基 — schema + ingest 链路本地跑通
+# Task: 后端第二批 — /api/chat + /api/deadlines + 最小可视 Playground
 
 ## Goal
-让 `/api/ingest` 能同步跑通：收 PDF/文本 → 传 S3 → Claude 抽 deadline → Titan 生成向量 → 写 CockroachDB 4 张表 → 返回抽出的 deadline 列表。这是整个后端的地基。
+在已 live 跑通的 ingest 基础上，补齐「对话检索」和「deadline 管理」接口，并加一个最小的 `/playground` 页面，让人能在浏览器 (localhost:3000/playground) 直接看到整条链路工作：贴文本→抽取 deadline→列表→对话问答。
 
 ## Context
-- CockroachDB × AWS 黑客松，单用户 demo（hardcode APP_USER_ID）。
-- 栈：Next.js 15 App Router + TS，pg 连 CockroachDB，@aws-sdk/client-bedrock-runtime + client-s3。
-- Bedrock：Claude 抽取（BEDROCK_CLAUDE_MODEL_ID），Titan V2 embedding（amazon.titan-embed-text-v2:0，1024 维）。
-- 架构已定：ingest 同步跑在 API route（部署 AWS Amplify，超时够）；Lambda 只做定时 agent，本任务不碰。
-- 前置：web/ 需先用 `create-next-app` 建好（见 README/根目录说明）。
-- **有参考原型**：作者旧项目 Échéo 已跑通同类逻辑，见下方「参考实现」——照着改写成 CRDB+Bedrock 版，别从零发明，也别整包照抄。
-
-## 参考实现（echeo2，路径 `~/Downloads/ep19-finalproject/echeo2`，仅参考不照抄）
-| 要写的 | 参考文件 | 借鉴什么 / 注意 |
-|---|---|---|
-| `extractDeadlines` prompt | `src/lib/ai/extract.ts` | 抽取 prompt 结构 + ISO 日期校验。**原文是法语，改写成英文**。 |
-| `chunkText` | `src/lib/ai/chunk.ts` | 切块参数/策略 |
-| `embed` | `src/lib/ai/embed.ts` | 封装模式；但它是 OpenAI 兼容 1536 维 → **改成 Bedrock Titan V2，1024 维** |
-| Claude 客户端 | `src/lib/ai/client.ts` | 调用/JSON 解析套路 → **从 @anthropic-ai/sdk 改成 @aws-sdk/client-bedrock-runtime** |
-| 向量检索 SQL | `supabase/migrations/0004_match_rpc.sql` | cosine `<=>` 检索语义**可原样借**；但**去掉 Supabase RPC/RLS 包装**，写成 CRDB 普通参数化 SQL |
-| 表结构 | `supabase/schema.sql` | 字段命名参考，但按本 TASK 的 6 表 + CRDB 向量语法为准 |
+- ingest 已 live 跑通（S3 / Bedrock Claude / Titan 1024 / CockroachDB）。
+- 环境变量：`BEDROCK_CLAUDE_MODEL_ID`（现为 Sonnet 4.5）、`BEDROCK_TITAN_MODEL_ID`、`APP_USER_ID`（单用户）。
+- 已有 lib：`db.ts`(query/withTransaction)、`bedrock.ts`(extractDeadlines/embed/toVectorLiteral)、`memory.ts`(chunkText/writeMemory)。
+- 参考原型 echeo2（`~/Downloads/ep19-finalproject/echeo2`）：`src/app/api/chat/route.ts`、`src/lib/ai/agent.ts`、`supabase/migrations/0004_match_rpc.sql`（cosine 检索）。**法语一律改英文**，只借鉴思路不整包照抄。
 
 ## Requirements
-1. `infra/schema.sql`（可直接在 CRDB 跑通）：
-   - users / memory_documents / memory_chunks / deadlines / agent_events / messages 六张表。
-   - memory_chunks.embedding 用 `VECTOR(1024)`。
-   - **删掉 messages.embedding 列**（demo 不做对话向量检索，省成本）。
-   - 向量索引用 cosine：文件顶部先 `SET CLUSTER SETTING feature.vector_index.enabled = true;`，再
-     `CREATE VECTOR INDEX ON memory_chunks (embedding vector_cosine_ops);`
-   - deadlines 加 `UNIQUE (user_id, title, due_date)` 防重复 ingest 插重复。
-   - `CREATE INDEX ON deadlines (user_id, due_date);`
-2. `web/lib/db.ts`：pg Pool 连 DATABASE_URL，导出 query 帮手，连接池复用（别每请求新建）。
-3. `web/lib/bedrock.ts`：
-   - `extractDeadlines(text): Promise<{title,due_date,description,confidence}[]>` — 调 Claude，结构化 JSON 输出，prompt 要求只返回 JSON 数组、日期 ISO `YYYY-MM-DD`、给 confidence(0-1)、抽不到返回 `[]`。**prompt 用英文**（参考 echeo2 `extract.ts` 结构，把法语改写成英文；本项目所有 prompt 和用户可见文案一律英文）。
-   - `embed(text): Promise<number[]>` — 调 Titan V2，返回 1024 维。
-4. `web/lib/memory.ts`：
-   - `chunkText(text)` — 按段落切块（~500 字符/块）。
-   - `writeMemory(...)` — 事务里写 memory_documents + memory_chunks(embedding) + deadlines + agent_events('ingest')。
-   - chunk embedding 调用**限并发**（最多 5 个并发，别无脑 Promise.all，Titan 按 RPM 限流）。
-5. `web/app/api/ingest/route.ts`：`POST`，接 multipart(file) 或 `{text}`；PDF 用 pdf-parse 抽文本；传 S3；调上面链路；`export const maxDuration = 60;`；返回 `{documentId, deadlines: [...]}`。错误要兜底（Claude 抽取失败/S3 失败分别返回可读错误，别 500 裸奔）。
+1. `web/lib/bedrock.ts` 增 `answer(question: string, context: string): Promise<string>` — 调 Claude 生成英文回答，prompt 要求基于给定 context（检索到的记忆片段 + deadlines），无依据就说不知道，别编。
+2. `web/lib/memory.ts` 增：
+   - `searchChunks(userId, queryEmbedding: number[], k=6)` — cosine 检索 memory_chunks，返回 `{content, similarity}[]`，参数化 `$1::VECTOR(1024)`，按 `embedding <=> $1` 升序。
+   - `openDeadlines(userId)` — 取 status='open' 按 due_date。
+   - `recentMessages(userId, n=10)` — 最近对话。
+3. `web/app/api/chat/route.ts` POST `{message}`：embed(message) → searchChunks + openDeadlines 组 context → `answer()` 生成 → 事务存 user+assistant 两条到 messages + agent_events('answer') → 返回 `{answer, sources:[{content,similarity}]}`。错误分类兜底。
+4. `web/app/api/deadlines/route.ts`：
+   - GET（可选 `?status=open`）：返回 deadlines 列表按 due_date 升序。
+   - PATCH `{id, status}`：status ∈ open|done|dismissed，更新 status + updated_at；返回更新后的行。校验非法 status → 400。
+5. `web/app/playground/page.tsx`（**独立路由，`"use client"`，纯功能最简样式，顶部标 "Dev Playground — not the real UI"**）：
+   - 文本框 + Ingest 按钮 → POST /api/ingest（JSON text）→ 显示抽出的 deadlines。
+   - Deadlines 区：GET /api/deadlines 渲染表格（title/due_date/status/confidence），每行一个 "Done" 按钮 → PATCH。
+   - Chat 区：输入框 + Send → POST /api/chat → 显示 answer 和 sources。
 
 ## Constraints
-- 不要动 web/components/ 和任何前端页面（队友的地盘）。
-- 不要引入 ORM（Prisma 等），就用 pg + 原生 SQL。
-- 不要为多用户/团队做任何抽象，单用户到底。
-- schema 向量语法必须对着 CockroachDB v25.x 官方文档，不照抄二手资料。
-- 参考 echeo2 只借鉴逻辑/prompt/SQL 思路，**不整包 copy-paste**（比赛"新项目"规则）；README 里如实披露"基于作者 Échéo 经验重建"。
-- **语言：所有 LLM prompt、代码注释里的用户可见文案、返回给前端的文字，一律英文**（echeo2 的法语部分全部改英文）。
+- **不要碰** `web/app/page.tsx`、`web/app/layout.tsx`、`web/components/`（队友前端地盘）。playground 自成一路由。
+- pg + 原生参数化 SQL，无 ORM。单用户 `APP_USER_ID`。所有 prompt / UI 文案英文。
+- 向量检索 cosine `<=>` + `$n::VECTOR(1024)`。复用现有 lib，别重复造。
 
 ## Implementation Plan
-1. 写 infra/schema.sql（含上面所有修正），本地/CRDB 跑一遍确认无语法错。
-2. lib/db.ts 连接池 + 一个 `SELECT 1` 冒烟。
-3. lib/bedrock.ts：先 embed 通（打印 1024 维），再 extractDeadlines 通（喂一段假 IRCC 邮件文本，看 JSON）。
-4. lib/memory.ts：chunk + 限并发 embed + 事务写库。
-5. api/ingest/route.ts 串起来；用 curl 传一个 PDF 验证。
+1. lib/memory.ts 加 searchChunks/openDeadlines/recentMessages（先各写一句冒烟）。
+2. lib/bedrock.ts 加 answer()。
+3. api/chat 串起来；api/deadlines GET/PATCH。
+4. playground 页面调这三个接口。
+5. `npx tsc --noEmit` + `npm run lint` + `npm run test` 全过。
 
 ## Acceptance Criteria
-- `cockroach sql --url $DATABASE_URL < infra/schema.sql` 无报错，6 张表 + 向量索引建成。
-- `curl -F file=@sample.pdf localhost:3000/api/ingest` 返回 JSON，含 ≥1 条 deadline。
-- 库里 memory_documents/memory_chunks/deadlines/agent_events 各有对应行，embedding 非空且 1024 维。
-- 重复 ingest 同一文件不产生重复 deadline（UNIQUE 生效）。
-- Claude 抽取失败时返回结构化错误而非崩溃。
+- `npm run dev` 后 `POST /api/chat {"message":"When is my CAQ due?"}` 返回带 answer 的 JSON，answer 里含 2026-08-01，sources 非空。
+- `GET /api/deadlines?status=open` 返回之前 ingest 的 deadline 列表。
+- `PATCH /api/deadlines {id,status:"done"}` 后再 GET，该条 status=done。
+- 浏览器打开 `localhost:3000/playground` 能完成：贴文本→看到 deadlines→点 Done→问一句得到回答。
+- tsc / lint / vitest 全绿。
 
 ## Review Focus
-- 向量索引语法 + cluster setting 是否正确（最容易翻车）。
-- 事务边界：4 张表要么全写要么全回滚。
-- Titan 并发限流是否真的生效（RPM）。
-- 连接池是否复用、有没有连接泄漏。
-- PDF 抽取空文本 / 超大文件的边界处理。
+- chat 的事务边界（user+assistant+event 一起写）。
+- 向量检索 SQL 参数化与 cosine 方向（`<=>` 升序 = 最近）。
+- context 拼接是否会超 token；answer 无依据时是否会编。
+- playground 是否真的没碰 teammate 的文件。
+- PATCH 的 status 校验与 SQL 注入面（参数化）。
