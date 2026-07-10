@@ -58,3 +58,34 @@ Decisions/risks:
 
 - The duplicate pre-check is intentionally outside the write transaction to avoid Titan calls for already-ingested text; all DB writes remain inside a single transaction.
 - A true concurrent duplicate can still do redundant Titan work if both requests pass the pre-check before either inserts, but the unique constraint and conflict handling prevent duplicate documents/chunks from being written.
+
+## Round 2
+
+Files changed:
+
+- `web/lib/bedrock.ts`
+- `web/lib/memory.ts`
+- `web/app/api/chat/route.ts`
+- `web/app/api/deadlines/route.ts`
+- `web/app/playground/page.tsx`
+- `.ai/HANDOFF.md`
+
+Static verification:
+
+- `cd web && npx tsc --noEmit`: passed, 0 TypeScript errors.
+- `cd web && npm run lint`: passed, 0 ESLint errors.
+- `cd web && npm run test`: passed, 2 test files and 14 tests.
+
+Key decisions:
+
+- Chat context assembly combines three sections: vector-retrieved `memory_chunks`, open deadlines, and the last 10 messages in chronological order. The Claude prompt in `answer()` instructs the model to answer only from that context, use English, include exact dates when supported, and say it does not know when context is insufficient.
+- Vector retrieval is raw parameterized SQL using the existing `toVectorLiteral()` helper, cosine distance with `embedding <=> $1::VECTOR(1024)`, and ascending distance order. Similarity is returned as `1 - distance`.
+- `/api/chat` does Bedrock embedding, DB context retrieval, and Bedrock answer generation before opening the write transaction. The transaction covers the user upsert, user/assistant message inserts, and `agent_events('answer')` insert together.
+- `/api/deadlines` uses raw parameterized SQL only. `GET` optionally filters by a validated status and orders by due date. `PATCH` validates `status` against `open|done|dismissed`, updates `status` and `updated_at`, and scopes the update to `APP_USER_ID`.
+- `/playground` is a standalone `"use client"` route. It calls `/api/ingest` with `{ text }`, refreshes `/api/deadlines`, patches rows to `done`, and posts chat messages to `/api/chat`, then displays the answer and retrieved sources. It does not import or modify the teammate-owned page/layout/components.
+
+Review notes:
+
+- No live DB, Bedrock, S3, or HTTP calls were attempted from the sandbox.
+- `web/app/page.tsx`, `web/app/layout.tsx`, and `web/components/` were not modified.
+- The initial playground deadline refresh has a narrow ESLint suppression for `react-hooks/set-state-in-effect`; this page is dev-only and intentionally loads backend state when opened.

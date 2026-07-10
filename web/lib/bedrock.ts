@@ -167,3 +167,53 @@ export async function embed(text: string): Promise<number[]> {
 export function toVectorLiteral(vector: number[]): string {
   return `[${vector.join(",")}]`;
 }
+
+export async function answer(question: string, context: string): Promise<string> {
+  const modelId = process.env.BEDROCK_CLAUDE_MODEL_ID;
+  if (!modelId) {
+    throw new Error("BEDROCK_CLAUDE_MODEL_ID is not configured.");
+  }
+
+  const prompt = [
+    "You are Deadline Copilot, an assistant that answers questions using only the provided context.",
+    "The context may include retrieved memory excerpts, open deadlines, and recent chat messages.",
+    "Answer in English. Be concise, but include exact dates when the context supports them.",
+    "If the context does not contain enough information to answer, say you do not know based on the available context.",
+    "Do not invent facts, dates, requirements, sources, or next steps.",
+    "",
+    "Context:",
+    context.slice(0, 60_000) || "No context was available.",
+    "",
+    "Question:",
+    question.slice(0, 8_000),
+  ].join("\n");
+
+  const command = new InvokeModelCommand({
+    modelId,
+    contentType: "application/json",
+    accept: "application/json",
+    body: JSON.stringify({
+      anthropic_version: "bedrock-2023-05-31",
+      max_tokens: 1200,
+      temperature: 0,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: prompt }],
+        },
+      ],
+    }),
+  });
+
+  const result = await getBedrockClient().send(command);
+  if (!result.body) {
+    throw new Error("Claude returned an empty response.");
+  }
+
+  const text = textFromClaudeResponse(decodeJsonBody<unknown>(result.body)).trim();
+  if (!text) {
+    throw new Error("Claude returned an empty answer.");
+  }
+
+  return text;
+}

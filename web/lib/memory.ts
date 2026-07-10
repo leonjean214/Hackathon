@@ -19,6 +19,29 @@ export interface WriteMemoryResult {
   deadlines: ExtractedDeadline[];
 }
 
+export interface SearchChunkResult {
+  content: string;
+  similarity: number;
+}
+
+export interface DeadlineRow {
+  id: string;
+  title: string;
+  due_date: string;
+  description: string | null;
+  confidence: number;
+  status: "open" | "done" | "dismissed";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MessageRow {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+}
+
 interface EmbeddedChunk {
   content: string;
   embedding: number[];
@@ -88,6 +111,64 @@ async function mapWithConcurrency<T, R>(
   const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
   await Promise.all(workers);
   return results;
+}
+
+export async function searchChunks(
+  userId: string,
+  queryEmbedding: number[],
+  k = 6
+): Promise<SearchChunkResult[]> {
+  const limit = Math.max(1, Math.min(20, Math.trunc(k)));
+  const result = await query<SearchChunkResult>(
+    `SELECT
+       content,
+       1 - (embedding <=> $1::VECTOR(1024)) AS similarity
+     FROM memory_chunks
+     WHERE user_id = $2
+     ORDER BY embedding <=> $1::VECTOR(1024)
+     LIMIT $3`,
+    [toVectorLiteral(queryEmbedding), userId, limit]
+  );
+
+  return result.rows;
+}
+
+export async function openDeadlines(userId: string): Promise<DeadlineRow[]> {
+  const result = await query<DeadlineRow>(
+    `SELECT
+       id,
+       title,
+       due_date::STRING AS due_date,
+       description,
+       confidence,
+       status,
+       created_at::STRING AS created_at,
+       updated_at::STRING AS updated_at
+     FROM deadlines
+     WHERE user_id = $1 AND status = 'open'
+     ORDER BY due_date ASC, created_at ASC`,
+    [userId]
+  );
+
+  return result.rows;
+}
+
+export async function recentMessages(userId: string, n = 10): Promise<MessageRow[]> {
+  const limit = Math.max(1, Math.min(50, Math.trunc(n)));
+  const result = await query<MessageRow>(
+    `SELECT id, role, content, created_at::STRING AS created_at
+     FROM (
+       SELECT id, role, content, created_at
+       FROM messages
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2
+     ) recent
+     ORDER BY created_at ASC`,
+    [userId, limit]
+  );
+
+  return result.rows;
 }
 
 async function insertDocument(

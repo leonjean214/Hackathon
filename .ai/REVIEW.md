@@ -46,6 +46,11 @@
 - 模型说明：Sonnet 5 / Fable 5 该账号 `not available`（走 Marketplace/需 sales），改用 `us.anthropic.claude-sonnet-4-5-20250929-v1:0`（代码模型无关，换 env 即可切）。
 - Claude 输出带 ```json 围栏，`parseJsonArray` 的正则回退已正确处理。
 
+## Round 2 审查 + live 验证 (2026-07-10) ✅
+`/api/chat` + `/api/deadlines` + `/playground`，审查通过无阻塞，live 三接口全绿：
+- 代码：searchChunks cosine `<=>` 升序方向对；recentMessages 子查询 DESC+外层 ASC 时序对；answer() grounding prompt 严防幻觉；chat 事务(user+2 messages+event)原子；deadlines PATCH 参数化+status 白名单+user 隔离+404。未碰队友 page/layout/components。
+- live：GET deadlines 返 4 条；chat「When is CAQ due」正确基于检索记忆回答(1 source)；PATCH open→done 生效。
+
 ## 建议下一步顺序
 1. Codex 先修 ①③ 的 #1（去重）+ #2（大小上限）+ ④ 的 #4（纯函数单测）——这些不需要 infra，现在就能做。
 2. 你并行去开 CockroachDB 集群 + 申请/确认 Bedrock 权限 + 建 S3 桶，填 `.env.local`。
