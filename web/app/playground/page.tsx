@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type DeadlineStatus = "open" | "done" | "dismissed";
 
@@ -18,6 +18,12 @@ interface Source {
   similarity: number;
 }
 
+interface CalendarDay {
+  date: Date;
+  key: string;
+  inCurrentMonth: boolean;
+}
+
 function getErrorMessage(value: unknown): string {
   if (!value || typeof value !== "object") return "Request failed.";
   const error = (value as { error?: { message?: unknown } }).error;
@@ -33,10 +39,150 @@ async function readJson(response: Response): Promise<unknown> {
   return payload;
 }
 
+function toDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function deadlineDateKey(dueDate: string): string {
+  return dueDate.slice(0, 10);
+}
+
+function buildCalendarDays(monthStart: Date): CalendarDay[] {
+  const firstDay = new Date(monthStart.getFullYear(), monthStart.getMonth(), 1);
+  const lastDay = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0);
+  const gridStart = new Date(firstDay);
+  gridStart.setDate(firstDay.getDate() - firstDay.getDay());
+
+  const gridEnd = new Date(lastDay);
+  gridEnd.setDate(lastDay.getDate() + (6 - lastDay.getDay()));
+
+  const days: CalendarDay[] = [];
+  const cursor = new Date(gridStart);
+
+  while (cursor <= gridEnd) {
+    days.push({
+      date: new Date(cursor),
+      key: toDateKey(cursor),
+      inCurrentMonth: cursor.getMonth() === monthStart.getMonth(),
+    });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return days;
+}
+
+function statusDotClass(status: DeadlineStatus): string {
+  if (status === "done") return "bg-emerald-600";
+  if (status === "dismissed") return "bg-slate-400";
+  return "bg-amber-500";
+}
+
+function MonthCalendar({
+  deadlines,
+  monthStart,
+  onPreviousMonth,
+  onNextMonth,
+}: {
+  deadlines: Deadline[];
+  monthStart: Date;
+  onPreviousMonth: () => void;
+  onNextMonth: () => void;
+}) {
+  const todayKey = toDateKey(new Date());
+  const monthLabel = monthStart.toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+  });
+  const days = useMemo(() => buildCalendarDays(monthStart), [monthStart]);
+  const deadlinesByDate = useMemo(() => {
+    const grouped = new Map<string, Deadline[]>();
+
+    for (const deadline of deadlines) {
+      const key = deadlineDateKey(deadline.due_date);
+      const dayDeadlines = grouped.get(key) ?? [];
+      dayDeadlines.push(deadline);
+      grouped.set(key, dayDeadlines);
+    }
+
+    return grouped;
+  }, [deadlines]);
+
+  return (
+    <section style={styles.section}>
+      <div style={styles.row}>
+        <h2 style={styles.heading}>Calendar</h2>
+        <div className="flex items-center gap-2">
+          <button onClick={onPreviousMonth} style={styles.secondaryButton}>
+            ‹ Prev
+          </button>
+          <strong className="min-w-36 text-center text-sm">{monthLabel}</strong>
+          <button onClick={onNextMonth} style={styles.secondaryButton}>
+            Next ›
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-7 border-l border-t border-slate-200 text-sm">
+        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((weekday) => (
+          <div
+            key={weekday}
+            className="border-b border-r border-slate-200 bg-slate-50 px-2 py-1 font-semibold text-slate-600"
+          >
+            {weekday}
+          </div>
+        ))}
+        {days.map((day) => {
+          const dayDeadlines = day.inCurrentMonth ? deadlinesByDate.get(day.key) ?? [] : [];
+          const visibleDeadlines = dayDeadlines.slice(0, 3);
+          const extraCount = dayDeadlines.length - visibleDeadlines.length;
+          const isToday = day.key === todayKey;
+
+          return (
+            <div
+              key={day.key}
+              className={[
+                "min-h-28 border-b border-r border-slate-200 p-2",
+                day.inCurrentMonth ? "bg-white" : "bg-slate-50 text-slate-400",
+                isToday ? "ring-2 ring-inset ring-teal-500" : "",
+              ].join(" ")}
+            >
+              <div className="mb-2 text-xs font-semibold">{day.date.getDate()}</div>
+              <div className="grid gap-1">
+                {visibleDeadlines.map((deadline) => (
+                  <div
+                    key={deadline.id}
+                    title={deadline.title}
+                    className="flex items-center gap-1 truncate rounded border border-slate-200 bg-slate-50 px-1.5 py-1 text-xs text-slate-800"
+                  >
+                    <span
+                      className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass(deadline.status)}`}
+                    />
+                    <span className="truncate">{deadline.title}</span>
+                  </div>
+                ))}
+                {extraCount > 0 ? (
+                  <div className="text-xs text-slate-500">+{extraCount}</div>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 export default function PlaygroundPage() {
   const [ingestText, setIngestText] = useState("");
   const [ingestResult, setIngestResult] = useState<Deadline[]>([]);
   const [deadlines, setDeadlines] = useState<Deadline[]>([]);
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const today = new Date();
+    return new Date(today.getFullYear(), today.getMonth(), 1);
+  });
   const [message, setMessage] = useState("");
   const [answer, setAnswer] = useState("");
   const [sources, setSources] = useState<Source[]>([]);
@@ -122,6 +268,12 @@ export default function PlaygroundPage() {
     }
   }
 
+  function changeCalendarMonth(offset: number) {
+    setCalendarMonth(
+      (current) => new Date(current.getFullYear(), current.getMonth() + offset, 1)
+    );
+  }
+
   return (
     <main style={styles.page}>
       <header style={styles.header}>
@@ -147,6 +299,13 @@ export default function PlaygroundPage() {
         </form>
         <pre style={styles.pre}>{JSON.stringify(ingestResult, null, 2)}</pre>
       </section>
+
+      <MonthCalendar
+        deadlines={deadlines}
+        monthStart={calendarMonth}
+        onPreviousMonth={() => changeCalendarMonth(-1)}
+        onNextMonth={() => changeCalendarMonth(1)}
+      />
 
       <section style={styles.section}>
         <div style={styles.row}>
