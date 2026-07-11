@@ -89,3 +89,55 @@ Review notes:
 - No live DB, Bedrock, S3, or HTTP calls were attempted from the sandbox.
 - `web/app/page.tsx`, `web/app/layout.tsx`, and `web/components/` were not modified.
 - The initial playground deadline refresh has a narrow ESLint suppression for `react-hooks/set-state-in-effect`; this page is dev-only and intentionally loads backend state when opened.
+
+## Round 3
+
+Files changed:
+
+- `web/lib/bedrock.ts`
+- `web/app/api/ingest/route.ts`
+- `web/lib/memory.ts`
+- `web/lib/__tests__/bedrock.test.ts`
+- `agent/handler.ts`
+- `agent/package.json`
+- `agent/README.md`
+- `scripts/seed.ts`
+- `web/package.json`
+- `.ai/HANDOFF.md`
+
+Static verification:
+
+- `cd web && npx tsc --noEmit`: passed, 0 TypeScript errors.
+- `cd web && npm run lint`: passed, 0 ESLint errors.
+- `cd web && npm run test`: passed, 2 test files and 19 tests.
+
+Multimodal content-block decision:
+
+- `extractFromMedia()` uses Bedrock `InvokeModel` with Anthropic Messages payloads, `anthropic_version: "bedrock-2023-05-31"`, `BEDROCK_CLAUDE_MODEL_ID`, `temperature: 0`, and `max_tokens: 4000`.
+- PDF input is sent as a `document` block with `{ type: "base64", media_type: "application/pdf", data }`, followed by a text prompt requesting `{"transcript":"...","deadlines":[...]}`.
+- PNG/JPEG input is sent as an `image` block with `{ type: "base64", media_type: "image/png"|"image/jpeg", data }`, followed by the same JSON prompt.
+- Returned deadlines are normalized through the existing `normalizeDeadline()` path. The returned transcript becomes the document text used by existing `writeMemory()` chunking and Titan embedding.
+- Text PDFs still try `pdf-parse` first. If extracted text is at least 120 characters, the existing text extraction path is used. Empty/scanned PDFs fall back to Claude multimodal extraction.
+- If Bedrock rejects PDF document blocks for the configured model or region, the API returns a structured `MULTIMODAL_EXTRACTION_FAILED` error that explicitly notes PDF document block support may be unavailable.
+
+Reminder Lambda:
+
+- `agent/handler.ts` is self-contained and imports only `pg`.
+- It scans `status = 'open'` deadlines due from today through `REMINDER_WINDOW_DAYS` days, defaulting to 30.
+- It avoids duplicate same-day reminders with a `NOT EXISTS` check against `agent_events` where `event_type = 'remind'`, `payload->>'deadlineId'` matches, and `created_at` is within the current calendar day.
+- It writes `agent_events('remind')` payloads shaped as `{deadlineId,title,dueDate,daysLeft}` and returns `{scanned, remindersCreated}`. Caught errors return an error summary instead of throwing a raw Lambda failure.
+
+Seed script:
+
+- `scripts/seed.ts` loads `web/.env.local`, uses existing `extractDeadlines()` and `writeMemory()`, and inserts four realistic IRCC/CAQ/work-permit/passport-request samples.
+- Idempotency relies on the existing `memory_documents` `(user_id, text_hash)` dedup in `writeMemory()`, so repeated seed runs reuse documents instead of duplicating chunks.
+- `web/package.json` has `npm run seed` as `tsx ../scripts/seed.ts`.
+
+Pending live verification:
+
+- No live DB, Bedrock, S3, HTTP, or seed execution was attempted from the sandbox.
+- Upload PNG/JPEG and scanned PDF samples through `/api/ingest`; confirm Claude returns transcript plus deadlines and `memory_chunks` store transcript embeddings.
+- Upload a text PDF and confirm it stays on the `pdf-parse` text path.
+- Confirm the configured Sonnet 4.5 Bedrock model accepts Anthropic PDF `document` blocks via `InvokeModel`; if not, keep the structured failure and consider an OCR/PDF raster fallback.
+- Run the Lambda against a real DB or local mock data; confirm one remind event is created per due deadline per day and repeat runs do not duplicate same-day reminders.
+- Run `cd web && npm run seed` with live env; confirm sample documents/deadlines are created and a second run does not duplicate chunks or documents.

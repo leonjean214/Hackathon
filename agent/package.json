@@ -1,0 +1,15 @@
+{
+  "name": "deadline-copilot-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "handler.ts",
+  "dependencies": {
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5"
+  }
+}

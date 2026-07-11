@@ -2,13 +2,24 @@ import { NextResponse } from "next/server";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { createHash, randomUUID } from "crypto";
 import { PDFParse } from "pdf-parse";
-import { extractDeadlines } from "@/lib/bedrock";
+import {
+  extractDeadlines,
+  extractFromMedia,
+  type ExtractedDeadline,
+  type SupportedMediaType,
+} from "@/lib/bedrock";
 import { writeMemory } from "@/lib/memory";
 
 export const maxDuration = 60;
 export const runtime = "nodejs";
 
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const MIN_TEXT_PDF_CHARS = 120;
+const SUPPORTED_MEDIA_TYPES = new Set<string>([
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+]);
 
 interface IngestPayload {
   text?: unknown;
@@ -17,6 +28,12 @@ interface IngestPayload {
 class FileTooLargeError extends Error {
   constructor() {
     super(`Upload size must be ${MAX_UPLOAD_BYTES / 1024 / 1024} MB or less.`);
+  }
+}
+
+class MultimodalExtractionError extends Error {
+  constructor(message: string) {
+    super(message);
   }
 }
 
@@ -53,12 +70,75 @@ async function extractPdfText(buffer: Buffer): Promise<string> {
   }
 }
 
+function isSupportedMediaType(mimeType: string): mimeType is SupportedMediaType {
+  return SUPPORTED_MEDIA_TYPES.has(mimeType);
+}
+
+function inferMimeType(file: File): string {
+  const name = file.name.toLowerCase();
+  if (file.type) return file.type;
+  if (name.endsWith(".pdf")) return "application/pdf";
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
+  if (name.endsWith(".txt")) return "text/plain";
+  return "application/octet-stream";
+}
+
+async function extractUploadContent(
+  body: Buffer,
+  mimeType: string
+): Promise<{
+  text: string;
+  sourceType: "pdf" | "text" | "image";
+  deadlines: ExtractedDeadline[] | null;
+}> {
+  if (mimeType === "application/pdf") {
+    const pdfText = await extractPdfText(body);
+    if (pdfText.length >= MIN_TEXT_PDF_CHARS) {
+      return { text: pdfText, sourceType: "pdf", deadlines: null };
+    }
+
+    let mediaResult;
+    try {
+      mediaResult = await extractFromMedia(body.toString("base64"), "application/pdf");
+    } catch (error) {
+      throw new MultimodalExtractionError(
+        error instanceof Error ? error.message : "Multimodal PDF extraction failed."
+      );
+    }
+    return {
+      text: mediaResult.transcript,
+      sourceType: "pdf",
+      deadlines: mediaResult.deadlines,
+    };
+  }
+
+  if (mimeType === "image/png" || mimeType === "image/jpeg") {
+    let mediaResult;
+    try {
+      mediaResult = await extractFromMedia(body.toString("base64"), mimeType);
+    } catch (error) {
+      throw new MultimodalExtractionError(
+        error instanceof Error ? error.message : "Multimodal image extraction failed."
+      );
+    }
+    return {
+      text: mediaResult.transcript,
+      sourceType: "image",
+      deadlines: mediaResult.deadlines,
+    };
+  }
+
+  return { text: body.toString("utf8").trim(), sourceType: "text", deadlines: null };
+}
+
 async function readRequest(request: Request): Promise<{
   body: Buffer;
   text: string;
-  sourceType: "pdf" | "text";
+  sourceType: "pdf" | "text" | "image";
   fileName: string | null;
   mimeType: string | null;
+  deadlines: ExtractedDeadline[] | null;
 }> {
   const contentType = request.headers.get("content-type") || "";
 
@@ -72,17 +152,19 @@ async function readRequest(request: Request): Promise<{
       const arrayBuffer = await file.arrayBuffer();
       const body = Buffer.from(arrayBuffer);
       assertUploadSize(body.length);
-      const mimeType = file.type || "application/octet-stream";
-      const isPdf =
-        mimeType === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
-      const text = isPdf ? await extractPdfText(body) : body.toString("utf8").trim();
+      const mimeType = inferMimeType(file);
+      if (mimeType !== "text/plain" && !isSupportedMediaType(mimeType)) {
+        throw new Error("Upload a PDF, PNG, JPEG, plain text file, or paste text.");
+      }
+      const extracted = await extractUploadContent(body, mimeType);
 
       return {
         body,
-        text,
-        sourceType: isPdf ? "pdf" : "text",
+        text: extracted.text,
+        sourceType: extracted.sourceType,
         fileName: file.name || "upload",
         mimeType,
+        deadlines: extracted.deadlines,
       };
     }
 
@@ -96,6 +178,7 @@ async function readRequest(request: Request): Promise<{
         sourceType: "text",
         fileName: "pasted-text.txt",
         mimeType: "text/plain",
+        deadlines: null,
       };
     }
   }
@@ -114,6 +197,7 @@ async function readRequest(request: Request): Promise<{
         sourceType: "text",
         fileName: "pasted-text.txt",
         mimeType: "text/plain",
+        deadlines: null,
       };
     }
   }
@@ -171,6 +255,9 @@ export async function POST(request: Request): Promise<NextResponse> {
     if (error instanceof FileTooLargeError) {
       return jsonError(error.message, 413, "FILE_TOO_LARGE");
     }
+    if (error instanceof MultimodalExtractionError) {
+      return jsonError(error.message, 502, "MULTIMODAL_EXTRACTION_FAILED");
+    }
 
     return jsonError(
       error instanceof Error ? error.message : "Unable to read the ingest request.",
@@ -201,7 +288,7 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   let deadlines;
   try {
-    deadlines = await extractDeadlines(parsedRequest.text);
+    deadlines = parsedRequest.deadlines ?? (await extractDeadlines(parsedRequest.text));
   } catch (error) {
     return jsonError(
       `Deadline extraction failed: ${error instanceof Error ? error.message : "Unknown error"}`,

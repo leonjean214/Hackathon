@@ -6,7 +6,7 @@ import { query, withTransaction } from "./db";
 export interface WriteMemoryInput {
   userId: string;
   text: string;
-  sourceType: "pdf" | "text";
+  sourceType: "pdf" | "text" | "image";
   fileName: string | null;
   mimeType: string | null;
   s3Bucket: string;

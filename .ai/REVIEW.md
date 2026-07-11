@@ -51,6 +51,12 @@
 - 代码：searchChunks cosine `<=>` 升序方向对；recentMessages 子查询 DESC+外层 ASC 时序对；answer() grounding prompt 严防幻觉；chat 事务(user+2 messages+event)原子；deadlines PATCH 参数化+status 白名单+user 隔离+404。未碰队友 page/layout/components。
 - live：GET deadlines 返 4 条；chat「When is CAQ due」正确基于检索记忆回答(1 source)；PATCH open→done 生效。
 
+## Round 3 审查 + live 验证 (2026-07-10) ✅
+多模态 ingest + 每日提醒 Lambda + seed，审查通过无阻塞（tsc/lint/19 测试；未碰队友文件；多模态用 Anthropic document/image content block），live 全绿：
+- 多模态：PNG 扫描件 → Claude 视觉抽取 3 条 deadline，transcript 入 chunk(embedding 1024)。
+- 提醒 Lambda(agent/handler.ts 自包含 pg)：扫 30 天内 open deadline 建 remind 事件；重跑幂等(remindersCreated=0，同日同 deadline 不重复)。
+- seed：4 样本文档/8 deadline，幂等(text_hash 去重)。
+
 ## 建议下一步顺序
 1. Codex 先修 ①③ 的 #1（去重）+ #2（大小上限）+ ④ 的 #4（纯函数单测）——这些不需要 infra，现在就能做。
 2. 你并行去开 CockroachDB 集群 + 申请/确认 Bedrock 权限 + 建 S3 桶，填 `.env.local`。

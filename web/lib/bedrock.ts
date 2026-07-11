@@ -10,6 +10,13 @@ export interface ExtractedDeadline {
   confidence: number;
 }
 
+export interface MediaExtractionResult {
+  transcript: string;
+  deadlines: ExtractedDeadline[];
+}
+
+export type SupportedMediaType = "application/pdf" | "image/png" | "image/jpeg";
+
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const TITAN_DIMENSIONS = 1024;
 
@@ -38,6 +45,20 @@ export function parseJsonArray(text: string): unknown {
   const match = text.match(/\[[\s\S]*\]/);
   if (!match) {
     throw new Error("Claude did not return a JSON array.");
+  }
+
+  return JSON.parse(match[0]);
+}
+
+export function parseJsonObject(text: string): unknown {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    return JSON.parse(trimmed);
+  }
+
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) {
+    throw new Error("Claude did not return a JSON object.");
   }
 
   return JSON.parse(match[0]);
@@ -80,6 +101,64 @@ function textFromClaudeResponse(response: unknown): string {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+export function buildMediaContentBlocks(base64: string, mediaType: SupportedMediaType) {
+  const prompt = [
+    "Read this document or image and extract deadline information.",
+    "Return only a JSON object. Do not include markdown, explanations, or surrounding text.",
+    "The object must use exactly this shape: {\"transcript\":\"plain text transcript of the document\",\"deadlines\":[{\"title\":\"short deadline title\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"brief source-grounded description or null\",\"confidence\":0.0}]}",
+    "The transcript should be plain English text suitable for retrieval and summarization. Preserve important dates, names, case numbers, permit numbers, and action requirements.",
+    "Use ISO calendar dates only in YYYY-MM-DD format. If a deadline year is not clear from the document, omit that deadline from deadlines.",
+    "Use confidence from 0 to 1 based on how explicit the date and action are.",
+    "If there are no clear deadlines, return an empty deadlines array.",
+  ].join("\n");
+
+  if (mediaType === "application/pdf") {
+    return [
+      {
+        type: "document",
+        source: {
+          type: "base64",
+          media_type: "application/pdf",
+          data: base64,
+        },
+      },
+      { type: "text", text: prompt },
+    ];
+  }
+
+  return [
+    {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: mediaType,
+        data: base64,
+      },
+    },
+    { type: "text", text: prompt },
+  ];
+}
+
+function normalizeMediaExtraction(value: unknown): MediaExtractionResult {
+  if (!value || typeof value !== "object") {
+    throw new Error("Claude response was not a JSON object.");
+  }
+
+  const item = value as Record<string, unknown>;
+  const transcript = typeof item.transcript === "string" ? item.transcript.trim() : "";
+  const deadlines = Array.isArray(item.deadlines)
+    ? item.deadlines
+        .map(normalizeDeadline)
+        .filter((deadline): deadline is ExtractedDeadline => Boolean(deadline))
+    : [];
+
+  if (!transcript) {
+    throw new Error("Claude did not return a transcript.");
+  }
+
+  return { transcript, deadlines };
 }
 
 export async function extractDeadlines(text: string): Promise<ExtractedDeadline[]> {
@@ -131,6 +210,55 @@ export async function extractDeadlines(text: string): Promise<ExtractedDeadline[
   return parsed
     .map(normalizeDeadline)
     .filter((deadline): deadline is ExtractedDeadline => Boolean(deadline));
+}
+
+export async function extractFromMedia(
+  base64: string,
+  mediaType: SupportedMediaType
+): Promise<MediaExtractionResult> {
+  const modelId = process.env.BEDROCK_CLAUDE_MODEL_ID;
+  if (!modelId) {
+    throw new Error("BEDROCK_CLAUDE_MODEL_ID is not configured.");
+  }
+
+  const command = new InvokeModelCommand({
+    modelId,
+    contentType: "application/json",
+    accept: "application/json",
+    body: JSON.stringify({
+      anthropic_version: "bedrock-2023-05-31",
+      max_tokens: 4000,
+      temperature: 0,
+      messages: [
+        {
+          role: "user",
+          content: buildMediaContentBlocks(base64, mediaType),
+        },
+      ],
+    }),
+  });
+
+  let result;
+  try {
+    result = await getBedrockClient().send(command);
+  } catch (error) {
+    if (mediaType === "application/pdf") {
+      throw new Error(
+        `Multimodal PDF extraction failed. Bedrock InvokeModel may not support Anthropic PDF document blocks for this model or region: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
+    }
+
+    throw error;
+  }
+
+  if (!result.body) {
+    throw new Error("Claude returned an empty response.");
+  }
+
+  const rawText = textFromClaudeResponse(decodeJsonBody<unknown>(result.body));
+  return normalizeMediaExtraction(parseJsonObject(rawText));
 }
 
 export async function embed(text: string): Promise<number[]> {

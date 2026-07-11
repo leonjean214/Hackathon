@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { normalizeDeadline, parseJsonArray } from "../bedrock";
+import {
+  buildMediaContentBlocks,
+  normalizeDeadline,
+  parseJsonArray,
+  parseJsonObject,
+} from "../bedrock";
 
 describe("normalizeDeadline", () => {
   it("returns a normalized deadline for a valid object", () => {
@@ -80,5 +85,56 @@ describe("parseJsonArray", () => {
     expect(() => parseJsonArray("No deadlines found.")).toThrow(
       "Claude did not return a JSON array."
     );
+  });
+});
+
+describe("parseJsonObject", () => {
+  it("parses a clean JSON object", () => {
+    expect(parseJsonObject('{"transcript":"A","deadlines":[]}')).toEqual({
+      transcript: "A",
+      deadlines: [],
+    });
+  });
+
+  it("parses an object wrapped in prose", () => {
+    expect(parseJsonObject('Result:\n```json\n{"transcript":"A"}\n```')).toEqual({
+      transcript: "A",
+    });
+  });
+
+  it("throws when no object is present", () => {
+    expect(() => parseJsonObject("No JSON here.")).toThrow(
+      "Claude did not return a JSON object."
+    );
+  });
+});
+
+describe("buildMediaContentBlocks", () => {
+  it("builds a PDF document block for Anthropic messages on Bedrock", () => {
+    const blocks = buildMediaContentBlocks("abc123", "application/pdf");
+
+    expect(blocks[0]).toEqual({
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "application/pdf",
+        data: "abc123",
+      },
+    });
+    expect(blocks[1]).toMatchObject({ type: "text" });
+  });
+
+  it("builds an image block for JPEG uploads", () => {
+    const blocks = buildMediaContentBlocks("abc123", "image/jpeg");
+
+    expect(blocks[0]).toEqual({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: "image/jpeg",
+        data: "abc123",
+      },
+    });
+    expect(blocks[1]).toMatchObject({ type: "text" });
   });
 });
