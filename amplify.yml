@@ -1,0 +1,30 @@
+# AWS Amplify Hosting build spec — Deadline Copilot
+# Monorepo: the Next.js app lives in web/. Amplify auto-detects Next.js SSR
+# and deploys it on the WEB_COMPUTE platform (server-side /api/* routes work).
+#
+# In the Amplify console this file drives the build; you still set:
+#   - App root directory  = web   (matches appRoot below)
+#   - Environment variables (see DEPLOY.md)
+#   - A compute service role with Bedrock + S3 access (see DEPLOY.md)
+version: 1
+applications:
+  - appRoot: web
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            # Next.js 16 requires Node >= 20. Pin it regardless of image default.
+            - nvm use 20 || nvm install 20
+            - npm ci
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        # Next.js SSR output. Amplify reads .next and provisions the compute.
+        baseDirectory: .next
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
+          - .next/cache/**/*
