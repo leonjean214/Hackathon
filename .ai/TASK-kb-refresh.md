@@ -1,6 +1,6 @@
 # Task (BACKLOG，待用户确认数据源后开工): 政策知识库每日刷新 + Lambda 定时
 
-> 状态：**未开工**。用户已认可功能，但数据源策略/具体主题 URL 待定（见 Open decisions）。先按默认方案设计，确认后再交 Codex。
+> 状态：**可开工**。数据源已定 = **抓官方 URL 原文 fetch+extract**（见下方默认源清单）。交 Codex 执行。
 
 ## Goal
 让 agent 每天自动刷新 H1B / CAQ 等政策知识，存进**全局 RAG 知识库**并保持最新版；`/api/chat` 能基于最新政策回答（例如「最新 H1B 抽签规则是什么」）。由 AWS Lambda + EventBridge 每天定时触发；同一套逻辑做成本地脚本便于手动跑/演示。
@@ -32,9 +32,22 @@
 - 保持最新版：同 source_key 只留一份最新，旧版删除。
 - 复用现有 lib，别重复造 embed/chunk。
 
-## Open decisions（用户后续拍板，开工前必确认）
-- **数据源策略**：默认「抓官方 URL 原文 fetch+extract」；备选「URL + Claude 清洗成要点」/「每日 web 搜索」。
-- **覆盖主题 + 真实源 URL**：H1B(USCIS)、CAQ/魁省移民、加拿大学签/PGWP、通用签证提醒——需确认要哪些 + 对应官方 URL。
+## 数据源（已定）= 抓官方 URL 原文
+`infra/kb-sources.json` 默认放下面四个官方源（URL 可能变，抓取要容错；用户后续可增删）：
+```json
+[
+  { "key": "uscis-h1b", "title": "USCIS H-1B Specialty Occupations", "topic": "h1b",
+    "url": "https://www.uscis.gov/working-in-the-united-states/temporary-workers/h-1b-specialty-occupations-and-fashion-models" },
+  { "key": "quebec-caq-study", "title": "Quebec Acceptance Certificate (CAQ) for studies", "topic": "caq",
+    "url": "https://www.quebec.ca/en/immigration/study-quebec/obtain-authorizations/quebec-acceptance-certificate" },
+  { "key": "ircc-study-permit", "title": "IRCC Study permit", "topic": "study-permit",
+    "url": "https://www.canada.ca/en/immigration-refugees-citizenship/services/study-canada/study-permit.html" },
+  { "key": "ircc-pgwp", "title": "IRCC Post-Graduation Work Permit", "topic": "pgwp",
+    "url": "https://www.canada.ca/en/immigration-refugees-citizenship/services/study-canada/work/after-graduation/about.html" }
+]
+```
+- 抓取：node fetch + UA header + timeout；抽正文时去掉 script/style/nav 噪声（可用简单正则或轻量 HTML→text）。单源抓不到就 status='error' 跳过，不拖垮整体。
+- KB 刷新的 Lambda 入口独立于已存在的提醒 `agent/handler.ts`（那个是每日 deadline 提醒），新建 `agent/kb-handler.ts` 或在 agent 里另立入口。
 
 ## Acceptance Criteria（开工后）
 - `npx tsx scripts/refresh-kb.ts` 跑通：每源输出 updated/skipped/error；库里 SYSTEM 用户下出现 policy document+chunks(embedding 1024)。
