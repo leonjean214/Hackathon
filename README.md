@@ -11,9 +11,9 @@ Administrative, immigration, and academic deadlines (study permits, CAQ, PSTQ, H
 ## What it does
 
 - **Ingest** — Upload a PDF, paste text, or upload an image/scanned notice. Claude (via Amazon Bedrock) extracts structured deadlines; the document is chunked and embedded (Amazon Titan) into CockroachDB for long-term semantic memory. Scanned/image documents are read directly by Claude vision.
-- **Chat** — Ask questions in natural language. The agent retrieves relevant memory via CockroachDB vector search, pulls open deadlines, and answers with Claude — grounded only in retrieved context (no hallucinated dates).
+- **Chat** — Ask questions in natural language. The agent runs a *union* retrieval over CockroachDB vector search — recalling both your **personal memory** and a **shared policy knowledge base** (H-1B, CAQ, PSTQ…) — alongside your open deadlines, and answers with Claude grounded only in retrieved context (no hallucinated dates).
 - **Deadlines** — List, filter, and mark deadlines done/dismissed.
-- **Proactive agent** — A scheduled AWS Lambda scans for upcoming deadlines every day and records reminders — the agent works even when you're not looking.
+- **Proactive agents** — Two scheduled AWS Lambdas run every day with no user present: one scans upcoming deadlines and records reminder events; the other refreshes the shared policy knowledge base so answers stay current. The agent works even when you're not looking.
 
 ## Architecture
 
@@ -26,7 +26,8 @@ User ──▶ Next.js (AWS Amplify)
    Amazon S3       ──  original uploaded files
    CockroachDB     ──  persistent agentic memory + vector index
              ▲
-AWS Lambda + EventBridge (daily deadline-reminder agent)
+AWS Lambda + EventBridge  ──  daily deadline-reminder agent
+                              daily policy knowledge-base refresh agent
 ```
 
 ## Agentic memory (four kinds, in CockroachDB)
@@ -34,20 +35,20 @@ AWS Lambda + EventBridge (daily deadline-reminder agent)
 | Memory | Table | Role |
 |--------|-------|------|
 | Transactional | `deadlines` | structured deadlines (title, due date, status, confidence) |
-| Semantic | `memory_chunks` | document chunks + `VECTOR(1024)` cosine index for retrieval |
+| Semantic | `memory_chunks` | document chunks + `VECTOR(1024)` cosine index — personal memory **and** a shared policy KB versioned by `source_key` |
 | Episodic | `agent_events` | every agent action logged (`ingest`, `answer`, `remind`) |
 | Conversational | `messages` | user ↔ assistant chat history |
 
 ## CockroachDB tools used
 
 - **Distributed Vector Indexing** — the agent stores Titan embeddings in a `VECTOR(1024)` column with a cosine (`vector_cosine_ops`) index and runs semantic retrieval (`embedding <=> query`) on every chat turn to recall relevant memory.
-- **Cloud Managed MCP Server** — the agent connects to the cluster over MCP (read-only, audited) so an AI coding client can query live memory directly.
+- **Cloud Managed MCP Server** — the cluster is connected over MCP so an AI coding client (e.g. Claude Code) can query live agentic memory directly — inspecting `deadlines`, `agent_events`, and vector recall against the running cluster.
 - **ccloud CLI** — used to provision and manage the CockroachDB Cloud Serverless cluster.
 
 ## AWS services used
 
 - **Amazon Bedrock** — Claude (`claude-sonnet-4-5`) for deadline extraction, document/image vision, and grounded chat; Titan Text Embeddings V2 for 1024-dim embeddings.
-- **AWS Lambda + EventBridge** — self-contained daily agent that scans open deadlines within 30 days and writes reminder events.
+- **AWS Lambda + EventBridge** — two self-contained daily agents: one scans open deadlines within 30 days and writes reminder events; one refreshes the shared policy knowledge base (idempotent upserts keyed by `source_key`). Both run on daily EventBridge schedules.
 - **Amazon S3** — stores original uploaded documents.
 - **AWS Amplify** — hosts the Next.js application.
 
@@ -69,6 +70,6 @@ The app exposes `POST /api/ingest`, `POST /api/chat`, and `GET/PATCH /api/deadli
 
 ## Demo URL / Video / License
 
-- Demo: _TBD_
+- Demo: https://main.d170gm9decmo71.amplifyapp.com/
 - Video: _TBD_
 - License: [MIT](./LICENSE)
